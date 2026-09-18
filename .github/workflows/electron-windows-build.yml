@@ -65,7 +65,7 @@ jobs:
 
       - name: Install Electron dependencies
         working-directory: electron
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Build Electron for Windows
         working-directory: electron
