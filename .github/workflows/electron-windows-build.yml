@@ -1,0 +1,106 @@
+name: Build Windows Electron Installer
+
+# Fork / manual-only build: produces a Windows Electron installer (.exe) from the
+# build-opencode-fix branch and uploads it as a downloadable workflow artifact.
+# No GitHub Release is created and nothing is published to npm.
+#
+# Why webpack? Turbopack production builds allocate natively (Rust, off the V8 heap)
+# and on this module graph peak far above what a hosted runner can give — the VM is
+# reclaimed mid-compile with "The runner has received a shutdown signal" (see the
+# shared web-build comments in electron-release.yml, issue #6409). Webpack is the
+# project's documented escape hatch for RAM-constrained machines
+# (docs/reference/ENVIRONMENT.md).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows Electron (.exe)
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout build-opencode-fix
+        uses: actions/checkout@v7
+        with:
+          # Build the fork branch that carries this workflow.
+          ref: build-opencode-fix
+          persist-credentials: false
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: true
+
+      - name: Sanitize Windows home directory
+        shell: bash
+        run: |
+          # The default USERPROFILE contains junction points (Application Data)
+          # that cause EPERM errors during Next.js standalone build glob scans.
+          mkdir -p "$RUNNER_TEMP/home"
+          echo "USERPROFILE=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+
+      - name: Check native dependencies
+        run: npm run check:native-deps
+
+      - name: Build Next.js standalone (webpack fallback)
+        env:
+          JWT_SECRET: ci-build-secret-with-sufficient-length-for-validation
+          NODE_OPTIONS: "--max_old_space_size=6144"
+          # Webpack, not Turbopack: Turbopack production builds allocate natively
+          # (Rust, off the V8 heap) and peak far above what a hosted runner can
+          # give. Webpack is the project's documented escape hatch for
+          # RAM-constrained machines (docs/reference/ENVIRONMENT.md, #6409).
+          OMNIROUTE_USE_TURBOPACK: "0"
+        run: npm run build
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm ci --no-audit --no-fund
+
+      - name: Build Electron for Windows
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:win
+
+      - name: Collect Windows installers
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cd electron/dist-electron
+          # Copy all .exe files (NSIS installer + portable)
+          for file in *.exe; do
+            [ -f "$file" ] && cp "$file" ../../release-assets/
+          done
+          # Rename the portable exe as OmniRoute.exe (skip the NSIS "Setup" installer)
+          for file in *.exe; do
+            case "$file" in *Setup*) continue ;; esac
+            [ -f "$file" ] && cp "$file" "../../release-assets/OmniRoute.exe" && break
+          done
+          # electron-updater manifest must ship alongside the installers
+          for file in latest*.yml; do
+            [ -f "$file" ] && cp "$file" ../../release-assets/
+          done
+          cd ../../release-assets
+          if ! ls *.exe >/dev/null 2>&1; then
+            echo "::error::No Windows .exe was produced — electron-builder failed or emitted output elsewhere"
+            exit 1
+          fi
+          echo "Windows build artifacts:"
+          ls -la
+
+      - name: Upload Windows Electron artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-windows-build
+          path: release-assets/
