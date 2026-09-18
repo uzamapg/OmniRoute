@@ -1,0 +1,71 @@
+name: Build OmniRoute Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout patched branch
+        uses: actions/checkout@v4
+        with:
+          ref: build-opencode-fix
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+
+      - name: Show versions
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          git rev-parse HEAD
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          npm_config_ignore_scripts: "false"
+        run: |
+          npm ci --foreground-scripts
+
+      - name: Ensure better-sqlite3 is installed
+        shell: pwsh
+        run: |
+          npm install better-sqlite3 --no-save --foreground-scripts
+
+      - name: Verify native dependencies
+        shell: pwsh
+        run: |
+          node -e "console.log(require.resolve('better-sqlite3'))"
+          npm run check:native-deps
+
+      - name: Build Windows application
+        shell: pwsh
+        env:
+          OMNIROUTE_USE_TURBOPACK: "0"
+          OMNIROUTE_BUILD_MEMORY_MB: "8192"
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: |
+          npm run electron:build:win
+
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path electron\dist-electron -Recurse |
+            Select-Object FullName, Length
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniRoute-Windows-patched-3.8.51
+          path: |
+            electron/dist-electron/*.exe
+          if-no-files-found: error
+          retention-days: 7
